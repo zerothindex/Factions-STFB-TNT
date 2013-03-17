@@ -1,0 +1,5 @@
+name: Factions STFB TNT
+author: Zachary Potter (zsp@zachpotter.com)
+main: com.zachpotter.bukkit.factions.tnt.FactionsTNT
+version: 0
+depend: Factions
