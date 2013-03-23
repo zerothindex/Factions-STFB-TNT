@@ -13,8 +13,8 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.ExplosionPrimeEvent;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.util.Vector;
 
 import com.massivecraft.factions.Board;
 import com.massivecraft.factions.FLocation;
@@ -33,11 +33,9 @@ public class TNTListener implements Listener {
 
 	private final FactionsTNT plugin;
 
-	private static final int STICKY_FUSE = 20; // 20 ticks = 1 second
-	private static final int STICKY_TP_PERIOD = 5; // 5 ticks = .25 second
+	private static final int STICKY_TP_PERIOD = 10; // 5 ticks = .25 second
 
-	private static final float TNT_RADIUS = 2.1f;
-	private static final float TNT_STICKY_RADIUS = 1.9f;
+	private static final double GRAVEL_CHANCE = 0.2;
 
 	private static final int[][] critCoords = {	// crit hit coords
 		{0,0,0}, {-1,0,0}, {0,-1,0}, {0,0,-1}, {1,0,0}, {0,1,0}, {0,0,1}};
@@ -75,9 +73,6 @@ public class TNTListener implements Listener {
 
 		// If placing TNT in enemy territory, allow + auto-ignite!
 		if ( event.getBlock().getType() == Material.TNT) {
-			// Cancel the event so Factions doesn't process it (and spam player with no-placement msgs)
-			//  and then process event MANUALLY
-			event.setCancelled(true);
 			// Using Factions objects, find out if block was placed in enemy territory
 			FLocation loc = new FLocation(block.getLocation());
 			Faction fac = Board.getFactionAt(loc);
@@ -85,11 +80,15 @@ public class TNTListener implements Listener {
 			Rel rel = me.getRelationTo(fac);
 			// Determine if TNT should auto ignite
 			if (rel.equals(Rel.ENEMY)) {
+				// Cancel the event so Factions doesn't process it (and spam player with no-placement msgs)
+				//  and then process event MANUALLY
+				event.setCancelled(true);
 				// Bypassing Faction's land protection now...
 				spawnTNT(player, block);
 				plugin.logInfo("Let "+player.getDisplayName()+" place TNT in territory of "+fac.getTag());
-			} else if (!rel.equals(Rel.MEMBER)) {
-				// If the land isn't your own but isn't an enemy, you can't place it.
+			} else if (!fac.isNone() && !rel.isAtLeast(Rel.MEMBER)) {
+				// If the land isn't your own but isn't an enemy or wilderness, you can't place it.
+				event.setCancelled(true);
 				player.sendMessage(ChatColor.RED+"You can only attack enemies with TNT!");
 			}
 
@@ -105,6 +104,18 @@ public class TNTListener implements Listener {
 	}
 
 	/**
+	 * Just before the explosion, teleport sticky TNT back to its original location.
+	 */
+	@EventHandler(priority = EventPriority.LOW)
+	public void onExplosionPrime(ExplosionPrimeEvent event) {
+		if (stickyTNT.containsKey(event.getEntity())) {
+			// If TNT was sticky, put it back at its original location before continuing.
+			event.getEntity().teleport(stickyTNT.get(event.getEntity()));
+			stickyTNT.remove(event.getEntity());
+		}
+	}
+
+	/**
 	 * Receives all block explosion events with a list of blocks to be destroyed.
 	 * Throws the list out and uses our own algorithm.
 	 * 
@@ -114,15 +125,15 @@ public class TNTListener implements Listener {
 	 * 	SOLID ORE~ > OBSIDIAN~ > LAPIS BLOCK > SMOOTH BRICK > COBBLESTONE (and everything else) > AIR
 	 * 
 	 *  Iron doors don't break unless the block beneath them does.
-	 *  Stone/cobble has a 30% chance of turning to gravel if not directly adjacent with tnt
+	 *  Stone/cobble has a GRAVEL_CHANCE chance of turning to gravel if not directly adjacent with tnt.
 	 *  ~ only degrades when directly adjacent with tnt
 	 * 
 	 *  Block checking algorithm:
 	 *   - degrade critical hit spots (directly adjacent to tnt faces)
 	 *   - degrade edge blocks
-	 *       only if at least one of two laterally adjacent blocks are air or are being destroyed
+	 *       only if at least one of two laterally adjacent blocks are being destroyed
 	 *   - degrade corner blocks
-	 *       only if at least one of three adjacent blocks is or or being destroyed
+	 *       only if at least one of three adjacent blocks is being destroyed
 	 * 
 	 * Event priority is highest so other plugins have a chance to cancel the event.
 	 */
@@ -132,17 +143,20 @@ public class TNTListener implements Listener {
 
 		// Warn the faction (if any) about an explosion in their land
 		Faction fac = Board.getFactionAt(new FLocation(event.getEntity().getLocation()));
-		if (fac.isNormal()) {
+		if (!fac.isNone()) {
 			fac.msg(ChatColor.GRAY.toString()+ChatColor.ITALIC+"*An explosion rumbles from within your territory!*");
 		}
 
-		Block center = event.getLocation().getBlock();
 		// Clear block destroy list, we'll do that manually.
 		event.blockList().clear();
-		// If explosion isn't from TNT, don't do any block damage
-		// TODO Determine if this should always be the case
-		if (!(event.getEntity() instanceof TNTPrimed)) return;
 
+		if (!(event.getEntity() instanceof TNTPrimed)) {
+			// If explosion isn't from TNT, don't do any block damage
+			// TODO Determine if this should always be the case
+			return;
+		}
+
+		Block center = event.getLocation().getBlock();
 		// Go through all block coords and degrade/destroy
 		int x,y,z;
 
@@ -153,7 +167,7 @@ public class TNTListener implements Listener {
 			z = critCoords[i][2];
 
 			if (degrade(center.getRelative(x,y,z), true)) {
-				// If the hit block was destroyed, add it to the event
+				// If the degraded block was destroyed, add it to the event
 				//  blocklist so that it will be destroyed 'naturally'
 				event.blockList().add(center.getRelative(x,y,z));
 			}
@@ -166,10 +180,11 @@ public class TNTListener implements Listener {
 
 			int[][] adj = edgeAdjacents(edgeCoords[i]);
 
-			boolean degrade = event.blockList().contains(center.getRelative(adj[0][0],adj[0][1],adj[0][2]))
+			// isHit = at least one of two laterally adjacent blocks are being destroyed
+			boolean isHit = event.blockList().contains(center.getRelative(adj[0][0],adj[0][1],adj[0][2]))
 					|| event.blockList().contains(center.getRelative(adj[1][0],adj[1][1],adj[1][2]));
 
-			if (degrade && degrade(center.getRelative(x,y,z), false)) {
+			if (isHit && degrade(center.getRelative(x,y,z), false)) {
 				event.blockList().add(center.getRelative(x,y,z));
 			}
 		}
@@ -181,11 +196,13 @@ public class TNTListener implements Listener {
 			z = cornerCoords[i][2];
 
 			int[][] adj = cornerAdjacents(cornerCoords[i]);
-			boolean degrade = event.blockList().contains(center.getRelative(adj[0][0],adj[0][1],adj[0][2]))
+
+			// isHit = at least one of three adjacent blocks is being destroyed
+			boolean isHit = event.blockList().contains(center.getRelative(adj[0][0],adj[0][1],adj[0][2]))
 					|| event.blockList().contains(center.getRelative(adj[1][0],adj[1][1],adj[1][2]))
 					|| event.blockList().contains(center.getRelative(adj[2][0],adj[2][1],adj[2][2]));
 
-			if (degrade && degrade(center.getRelative(x,y,z), false)) {
+			if (isHit && degrade(center.getRelative(x,y,z), false)) {
 				event.blockList().add(center.getRelative(x,y,z));
 			}
 		}
@@ -225,15 +242,14 @@ public class TNTListener implements Listener {
 			// Keep track of the originally placed location for later
 			stickyTNT.put(tnt, location);
 			// Change fuse time of sticky TNT
-			tnt.setFuseTicks(STICKY_FUSE);
-			final Vector zeroVector = new Vector(0,0,0);
+			int stickyFuse = tnt.getFuseTicks();
 			// Schedule periodic delayed tasks to move the TNT back at its original location
-			for (long delay = STICKY_TP_PERIOD; delay <= (STICKY_FUSE - STICKY_TP_PERIOD); delay += STICKY_TP_PERIOD) {
+			for (long delay = STICKY_TP_PERIOD; delay < (stickyFuse - STICKY_TP_PERIOD); delay += STICKY_TP_PERIOD) {
 				plugin.getServer().getScheduler().scheduleSyncDelayedTask(plugin, new Runnable() {
 					@Override
 					public void run() {
 						tnt.teleport(location);
-						tnt.setVelocity(zeroVector);
+						tnt.setVelocity(tnt.getVelocity().setY(0.3));
 					}
 				}, delay);
 			}
@@ -268,11 +284,11 @@ public class TNTListener implements Listener {
 			block.setType(Material.COBBLESTONE);
 
 		} else if ( !critHit && (type == Material.COBBLESTONE || type == Material.STONE)
-				&& (Math.random() < 0.2) ) {
+				&& (Math.random() < GRAVEL_CHANCE) ) {
 			block.setType(Material.GRAVEL);
 
-			// every other type of block gets destroyed (except bedrock and iron door)
 		} else if (type != Material.BEDROCK && type != Material.IRON_DOOR_BLOCK){
+			// Every other type of block gets destroyed (except bedrock and iron door)
 			return true;
 		}
 		return false;

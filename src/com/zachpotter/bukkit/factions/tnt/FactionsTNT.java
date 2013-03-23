@@ -15,37 +15,36 @@ public class FactionsTNT extends JavaPlugin{
 
 	@Override
 	public void onDisable() {
-		logInfo("Disabling "+this.getDescription().getFullName()+".");
+		// Nothing to do here.
 	}
 
 	@Override
 	public void onEnable() {
-		logInfo("Enabling "+this.getDescription().getFullName()+"...");
-
 		//find out if Factions exists and is enabled
 		Plugin factionTester = this.getServer().getPluginManager().getPlugin("Factions");
 
-		if (factionTester != null && factionTester.isEnabled()) {
+		if (factionTester != null && factionTester.isEnabled()
+				&& factionTester.getDescription().getVersion().compareTo("1.8") >= 0) {
 			logInfo("Factions plugin found. Hijacking the plugin!");
 
 			tntListener = new TNTListener(this);
 			getServer().getPluginManager().registerEvents(tntListener, this);
 
 			logInfo("Done!");
-
-		} else {
-			logInfo("Factions plugin not found. Aborting!");
+			return;
 		}
 
+		logInfo("Suitable Factions plugin not found. Get Factions v1.8 or higher!");
+		getServer().getPluginManager().disablePlugin(this);
 	}
 
 	//Prints msg to console
 	public void logInfo(String msg) {
-		getLogger().info( "["+this.getDescription().getName()+"] " + msg );
+		getLogger().info( msg );
 	}
 
 	public void logWarning(String errorMsg) {
-		getLogger().warning( "["+this.getDescription().getName()+"] " + errorMsg );
+		getLogger().warning( errorMsg );
 	}
 
 }
